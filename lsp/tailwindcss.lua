@@ -7,31 +7,62 @@
 local util = require 'lspconfig.util'
 
 local function find_tailwind_global_css()
-  local target = [[%@import ['"]tailwindcss['"]%;]]
-  -- Find project root using `.git`
+  local git_pattern = [[@import ['"']tailwindcss]]
+  local lua_pattern = [[@import ['"]tailwindcss]]
+
   local buf = vim.api.nvim_get_current_buf()
   local root = vim.fs.root(buf, function(name)
     return name == '.git'
   end)
 
   if not root then
-    return nil -- no project root found
+    return nil
   end
 
-  -- Find stylesheet files in the project root (recursively)
-  local files = vim.fs.find(function(name)
-    return name:match('%.css$') or name:match('%.scss$') or name:match('%.pcss$')
-  end, {
-    path = root,
-    type = 'file',
-    limit = math.huge, -- search full tree
-  })
+  -- Fast path: use git grep to search only tracked files
+  if vim.fn.executable('git') == 1 then
+    local result = vim
+      .system({
+        'git',
+        'grep',
+        '-l',
+        git_pattern,
+        '--',
+        '*.css',
+        '*.scss',
+        '*.pcss',
+      }, { cwd = root, text = true })
+      :wait()
 
-  for _, path in ipairs(files) do
-    local content = vim.fn.readblob(path)
+    if result.code == 0 and result.stdout and result.stdout ~= '' then
+      local first_match = vim.split(result.stdout, '\n')[1]
+      if first_match and first_match ~= '' then
+        return root .. '/' .. first_match
+      end
+    end
+  end
 
-    if content:find(target, 1, true) then
-      return path -- return first match
+  -- Fallback: scan filesystem with vim.fs.dir, skipping heavy directories
+  local skip_dirs = {
+    node_modules = true,
+    ['.git'] = true,
+    dist = true,
+  }
+
+  for name, typ in
+    vim.fs.dir(root, {
+      depth = math.huge,
+      skip = function(dirname)
+        return not skip_dirs[vim.fs.basename(dirname)]
+      end,
+    })
+  do
+    if typ == 'file' and (name:match('%.css$') or name:match('%.scss$') or name:match('%.pcss$')) then
+      local path = root .. '/' .. name
+      local ok, content = pcall(vim.fn.readblob, path)
+      if ok and content:find(lua_pattern) then
+        return path
+      end
     end
   end
 
